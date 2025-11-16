@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
 import chromadb
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from transformers.pipelines import pipeline
 import PyPDF2
@@ -19,6 +20,7 @@ from pptx import Presentation
 from PIL import Image
 import pytesseract
 import io
+import shutil
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -41,23 +43,23 @@ except Exception as e:
     logging.error(f"Error initializing ChromaDB: {e}")
     raise
 
-# Load embedding model with error handling
+# Load embedding model
 try:
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 except Exception as e:
     logging.error(f"Error loading SentenceTransformer: {e}")
-    embedding_model = None
+    raise
 
 # Load zero-shot classifier for auto-categorization
 try:
     classifier = pipeline(
         "zero-shot-classification",
         model="facebook/bart-large-mnli",
-        device=-1
+        device=-1  # CPU
     )
 except Exception as e:
     logging.error(f"Error loading zero-shot classifier: {e}")
-    classifier = None
+    raise
 
 # Category labels for auto-tagging
 CANDIDATE_LABELS = [
@@ -70,13 +72,16 @@ CANDIDATE_LABELS = [
 UPLOAD_DIR = ROOT_DIR / 'uploads'
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Create the main app
+# Create the main app without a prefix
 app = FastAPI()
+
+# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
 # Add startup event to create indexes
 @app.on_event("startup")
 async def startup_event():
+    # Create indexes for better search performance
     await db.documents.create_index([("file_type", 1)])
     await db.documents.create_index([("tags", 1)])
     await db.documents.create_index([("name", "text"), ("text_content", "text")])
@@ -123,6 +128,7 @@ class UpdateTagsRequest(BaseModel):
 
 # Helper functions
 def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract text from PDF"""
     try:
         pdf_file = io.BytesIO(file_bytes)
         pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -135,6 +141,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         return ""
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
+    """Extract text from DOCX"""
     try:
         doc = docx.Document(io.BytesIO(file_bytes))
         text = "\n".join([para.text for para in doc.paragraphs])
@@ -144,14 +151,17 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         return ""
 
 def extract_text_from_pptx(file_bytes: bytes) -> str:
+    """Extract text from PPTX"""
     try:
         prs = Presentation(io.BytesIO(file_bytes))
         text = ""
         for slide in prs.slides:
             for shape in slide.shapes:
+                # Simple approach to avoid static analysis issues
                 try:
                     text += str(getattr(shape, 'text', ''))
                 except:
+                    # Skip problematic shapes
                     continue
         return text.strip()
     except Exception as e:
@@ -159,6 +169,7 @@ def extract_text_from_pptx(file_bytes: bytes) -> str:
         return ""
 
 def extract_text_from_image(file_bytes: bytes) -> str:
+    """Extract text from image using OCR"""
     try:
         image = Image.open(io.BytesIO(file_bytes))
         text = pytesseract.image_to_string(image)
@@ -168,6 +179,7 @@ def extract_text_from_image(file_bytes: bytes) -> str:
         return ""
 
 def extract_text(file_bytes: bytes, file_type: str) -> str:
+    """Extract text based on file type"""
     if file_type == "application/pdf":
         return extract_text_from_pdf(file_bytes)
     elif file_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
@@ -181,21 +193,16 @@ def extract_text(file_bytes: bytes, file_type: str) -> str:
     return ""
 
 def auto_categorize(text: str) -> List[str]:
+    """Auto-categorize document using zero-shot classification"""
     if not text or len(text.strip()) < 10:
         return []
     
-    # If classifier is not available, return empty list
-    if not classifier:
-        return []
-    
     try:
+        # Truncate text for classification (take first 500 chars)
         text_sample = text[:500]
-        # Type check to satisfy linter
-        if classifier is not None:
-            result = classifier(text_sample, CANDIDATE_LABELS, multi_label=True)
-        else:
-            return []
+        result = classifier(text_sample, CANDIDATE_LABELS, multi_label=True)
         
+        # Return tags with score > 0.3
         if isinstance(result, dict) and 'labels' in result and 'scores' in result:
             tags = [label for label, score in zip(result['labels'], result['scores']) if score > 0.3]
             return tags[:5]  # Return top 5 tags
@@ -205,6 +212,7 @@ def auto_categorize(text: str) -> List[str]:
         return []
 
 def get_snippet(text: str, max_length: int = 200) -> str:
+    """Get text snippet for preview"""
     if len(text) <= max_length:
         return text
     return text[:max_length] + "..."
@@ -216,13 +224,17 @@ async def root():
 
 @api_router.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
+    """Upload and process a document"""
     try:
+        # Read file
         file_bytes = await file.read()
         file_size = len(file_bytes)
         
+        # Check file size (max 20MB)
         if file_size > 20 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 20MB limit")
         
+        # Save file
         doc_id = str(uuid.uuid4())
         filename = file.filename or f"document_{doc_id}"
         file_ext = Path(filename).suffix or ".bin"
@@ -231,24 +243,25 @@ async def upload_document(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(file_bytes)
         
+        # Extract text
         text_content = extract_text(file_bytes, file.content_type or "")
-        tags = auto_categorize(text_content) if classifier else []
         
-        if text_content and embedding_model:
-            try:
-                # Type check to satisfy linter
-                if embedding_model is not None:
-                    embedding = embedding_model.encode(text_content).tolist()
-                    collection.add(
-                        ids=[doc_id],
-                        embeddings=[embedding],
-                        documents=[text_content],
-                        metadatas=[{"doc_id": doc_id, "name": filename}]
-                    )
-            except Exception as e:
-                logging.error(f"Error generating embedding: {e}")
-                # Continue without embedding if it fails
-
+        # Auto-categorize
+        tags = auto_categorize(text_content)
+        
+        # Generate embeddings
+        if text_content:
+            embedding = embedding_model.encode(text_content).tolist()
+            
+            # Store in Chroma
+            collection.add(
+                ids=[doc_id],
+                embeddings=[embedding],
+                documents=[text_content],
+                metadatas=[{"doc_id": doc_id, "name": filename}]
+            )
+        
+        # Store metadata in MongoDB
         doc = Document(
             id=doc_id,
             name=filename,
@@ -282,15 +295,22 @@ async def upload_document(file: UploadFile = File(...)):
 
 @api_router.post("/documents/search")
 async def search_documents(query: SearchQuery):
+    """Hybrid search: semantic + keyword"""
     try:
         results = []
+        
+        # Always build the filter regardless of whether there's a query
         mongo_filter = {}
         
+        # Apply filters
         if query.file_types:
+            # Handle image/ filter specially to match all image types
             image_filter_types = [ft for ft in query.file_types if ft == "image/"]
             other_types = [ft for ft in query.file_types if ft != "image/"]
             
             if image_filter_types:
+                # Match all image types
+                image_types = ["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]
                 if other_types:
                     mongo_filter['$or'] = [
                         {'file_type': {'$in': other_types}},
@@ -313,20 +333,25 @@ async def search_documents(query: SearchQuery):
             else:
                 mongo_filter['created_at'] = {'$lte': query.date_to}
         
+        # Optimize search by checking if we have any search query
         if query.query and query.query.strip():
             search_term = query.query.strip().lower()
             
+            # Build the search filter to prioritize exact matches
             search_filter = {
                 '$or': [
-                    {'name': {'$regex': f'^.*{search_term}.*$', '$options': 'i'}},
-                    {'tags': {'$in': [search_term]}}
+                    {'name': {'$regex': f'^.*{search_term}.*$', '$options': 'i'}},  # Partial name match
+                    {'tags': {'$in': [search_term]}}  # Exact tag match
                 ]
             }
             
+            # Combine with existing filters
             final_filter = {'$and': [mongo_filter, search_filter]} if mongo_filter else search_filter
             
+            # Query MongoDB with the combined filter
             docs = await db.documents.find(final_filter, {"_id": 0}).sort('created_at', -1).limit(query.limit).to_list(query.limit)
             
+            # Process results
             for doc in docs:
                 results.append(DocumentResponse(
                     id=doc['id'],
@@ -340,62 +365,68 @@ async def search_documents(query: SearchQuery):
                     updated_at=doc['updated_at']
                 ))
             
-            if len(results) < query.limit and not query.file_types and embedding_model:
+            # If we don't have enough results and there's no file type filter, try semantic search
+            if len(results) < query.limit and not query.file_types:
                 try:
-                    # Type check to satisfy linter
-                    if embedding_model is not None:
-                        query_embedding = embedding_model.encode(search_term).tolist()
-                        chroma_results = collection.query(
-                            query_embeddings=[query_embedding],
-                            n_results=min(query.limit - len(results), 50)
-                        )
+                    query_embedding = embedding_model.encode(search_term).tolist()
+                    chroma_results = collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=min(query.limit - len(results), 50)
+                    )
                     
-                        if chroma_results and chroma_results.get('ids') and len(chroma_results['ids']) > 0 and len(chroma_results['ids'][0]) > 0:
-                            ids = chroma_results['ids'][0]
-                            distances_data = chroma_results.get('distances')
-                            distances = []
-                            if distances_data and isinstance(distances_data, list) and len(distances_data) > 0:
-                                distances = distances_data[0]
+                    # Process semantic search results
+                    if chroma_results and chroma_results.get('ids') and len(chroma_results['ids']) > 0 and len(chroma_results['ids'][0]) > 0:
+                        ids = chroma_results['ids'][0]
+                        distances_data = chroma_results.get('distances')
+                        distances = []
+                        if distances_data and isinstance(distances_data, list) and len(distances_data) > 0:
+                            distances = distances_data[0]
+                        
+                        # Create a map of document IDs to scores
+                        semantic_scores = {}
+                        for i, doc_id in enumerate(ids):
+                            distance = distances[i] if i < len(distances) else 0
+                            # Convert distance to similarity score (0-1)
+                            score = 1 / (1 + distance) if distance is not None else 0
+                            semantic_scores[doc_id] = score
+                        
+                        # Fetch documents from MongoDB with scores, excluding already found ones
+                        existing_ids = [r.id for r in results]
+                        additional_filter = {"id": {"$nin": existing_ids}}
+                        if mongo_filter:
+                            combined_filter = {"$and": [mongo_filter, additional_filter]}
+                        else:
+                            combined_filter = additional_filter
                             
-                            semantic_scores = {}
-                            for i, doc_id in enumerate(ids):
-                                distance = distances[i] if i < len(distances) else 0
-                                score = 1 / (1 + distance) if distance is not None else 0
-                                semantic_scores[doc_id] = score
+                        docs = await db.documents.find({"id": {"$in": ids}, **combined_filter}, {"_id": 0}).to_list(len(ids))
+                        
+                        # Combine documents with scores
+                        semantic_results = []
+                        for doc in docs:
+                            doc_id = doc['id']
+                            score = semantic_scores.get(doc_id, 0)
                             
-                            existing_ids = [r.id for r in results]
-                            additional_filter = {"id": {"$nin": existing_ids}}
-                            if mongo_filter:
-                                combined_filter = {"$and": [mongo_filter, additional_filter]}
-                            else:
-                                combined_filter = additional_filter
-                                
-                            docs = await db.documents.find({"id": {"$in": ids}, **combined_filter}, {"_id": 0}).to_list(len(ids))
-                            
-                            semantic_results = []
-                            for doc in docs:
-                                doc_id = doc['id']
-                                score = semantic_scores.get(doc_id, 0)
-                                
-                                semantic_results.append(DocumentResponse(
-                                    id=doc_id,
-                                    name=doc['name'],
-                                    file_type=doc['file_type'],
-                                    size=doc['size'],
-                                    tags=doc['tags'],
-                                    file_path=doc['file_path'],
-                                    snippet=get_snippet(doc.get('text_content', '')),
-                                    created_at=doc['created_at'],
-                                    updated_at=doc['updated_at'],
-                                    score=score
-                                ))
-                            
-                            semantic_results.sort(key=lambda x: x.score or 0, reverse=True)
-                            results.extend(semantic_results[:query.limit - len(results)])
-                            
+                            semantic_results.append(DocumentResponse(
+                                id=doc_id,
+                                name=doc['name'],
+                                file_type=doc['file_type'],
+                                size=doc['size'],
+                                tags=doc['tags'],
+                                file_path=doc['file_path'],
+                                snippet=get_snippet(doc.get('text_content', '')),
+                                created_at=doc['created_at'],
+                                updated_at=doc['updated_at'],
+                                score=score
+                            ))
+                        
+                        # Sort by score (descending) and add to results
+                        semantic_results.sort(key=lambda x: x.score or 0, reverse=True)
+                        results.extend(semantic_results[:query.limit - len(results)])
+                        
                 except Exception as e:
                     logging.error(f"Error in semantic search: {e}")
-                    if len(results) == 0:
+                    # Fallback to text search in MongoDB if semantic search fails
+                    if len(results) == 0:  # Only if we haven't found any results yet
                         text_filter = {
                             '$or': [
                                 {'name': {'$regex': search_term, '$options': 'i'}},
@@ -404,8 +435,10 @@ async def search_documents(query: SearchQuery):
                             ]
                         }
                         
+                        # Combine with existing filters
                         final_filter = {'$and': [mongo_filter, text_filter]} if mongo_filter else text_filter
                         
+                        # Query MongoDB with text search
                         docs = await db.documents.find(final_filter, {"_id": 0}).limit(query.limit).to_list(query.limit)
                         
                         for doc in docs:
@@ -421,6 +454,7 @@ async def search_documents(query: SearchQuery):
                                 updated_at=doc['updated_at']
                             ))
         else:
+            # Return documents with filters applied (or all if no filters)
             docs = await db.documents.find(mongo_filter, {"_id": 0}).sort('created_at', -1).limit(query.limit).to_list(query.limit)
             
             for doc in docs:
@@ -444,6 +478,7 @@ async def search_documents(query: SearchQuery):
 
 @api_router.get("/documents/{doc_id}")
 async def get_document(doc_id: str):
+    """Get document details"""
     doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -451,6 +486,7 @@ async def get_document(doc_id: str):
 
 @api_router.get("/documents/{doc_id}/download")
 async def download_document(doc_id: str):
+    """Download document file"""
     doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -463,6 +499,7 @@ async def download_document(doc_id: str):
 
 @api_router.put("/documents/{doc_id}/tags")
 async def update_tags(doc_id: str, request: UpdateTagsRequest):
+    """Update document tags"""
     result = await db.documents.update_one(
         {"id": doc_id},
         {"$set": {"tags": request.tags, "updated_at": datetime.now(timezone.utc).isoformat()}}
@@ -475,33 +512,40 @@ async def update_tags(doc_id: str, request: UpdateTagsRequest):
 
 @api_router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
+    """Delete document"""
     doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
+    # Delete file
     file_path = Path(doc['file_path'])
     if file_path.exists():
         file_path.unlink()
     
+    # Delete from Chroma
     try:
         collection.delete(ids=[doc_id])
     except:
         pass
     
+    # Delete from MongoDB
     await db.documents.delete_one({"id": doc_id})
     
     return {"message": "Document deleted successfully"}
 
 @api_router.get("/stats")
 async def get_stats():
+    """Get statistics"""
     total_docs = await db.documents.count_documents({})
     
+    # Get file type distribution
     pipeline = [
         {"$group": {"_id": "$file_type", "count": {"$sum": 1}}},
         {"$sort": {"count": -1}}
     ]
     file_types = await db.documents.aggregate(pipeline).to_list(100)
     
+    # Get all unique tags
     all_docs = await db.documents.find({}, {"tags": 1, "_id": 0}).to_list(1000)
     all_tags = set()
     for doc in all_docs:
@@ -513,6 +557,7 @@ async def get_stats():
         "tags": sorted(list(all_tags))
     }
 
+# Include the router in the main app
 app.include_router(api_router)
 
 app.add_middleware(
@@ -523,6 +568,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -532,9 +578,3 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    print(f"Starting server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)

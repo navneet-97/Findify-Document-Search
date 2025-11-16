@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import "@/App.css";
 import axios from "axios";
-import { Search, Upload, FileText, Image as ImageIcon, File, Filter, Download, Tag, Trash2 } from "lucide-react";
+import { Search, Upload, FileText, Image as ImageIcon, File, Filter, X, Download, Tag, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,13 +25,16 @@ function App() {
   const [stats, setStats] = useState({ total_documents: 0, tags: [] });
   const [selectedFileType, setSelectedFileType] = useState("all");
   const [selectedTags, setSelectedTags] = useState([]);
+  const [previewDoc, setPreviewDoc] = useState(null);
   const [showFilters, setShowFilters] = useState(false);
   const searchTimeoutRef = useRef(null);
+  
+  // Cache for search results to improve performance
   const searchCacheRef = useRef(new Map());
-
+  
   useEffect(() => {
     fetchStats();
-    performSearch("", "all", []);
+    performSearch("", "all", []); // Load recent documents with no filters initially
   }, []);
 
   const fetchStats = async () => {
@@ -46,9 +49,12 @@ function App() {
   const performSearch = useCallback(async (query = searchQuery, fileType = selectedFileType, tags = selectedTags) => {
     setLoading(true);
     
+    // Create a cache key based on search parameters
     const cacheKey = `${query}|${fileType}|${tags.sort().join(',')}`;
     
+    // Check if we have cached results
     if (searchCacheRef.current.has(cacheKey)) {
+      console.log("Returning cached results for:", cacheKey);
       const cachedResults = searchCacheRef.current.get(cacheKey);
       setResults(cachedResults);
       setLoading(false);
@@ -56,8 +62,13 @@ function App() {
     }
     
     try {
+      // Debug logging
+      console.log("Performing search with:", { query, fileType, tags });
+      
+      // Process file types for backend
       let fileTypes = null;
       if (fileType !== "all") {
+        // Handle image/ special case
         if (fileType === "image/") {
           fileTypes = ["image/"];
         } else {
@@ -71,13 +82,17 @@ function App() {
         tags: tags.length > 0 ? tags : null,
         limit: 50
       }, {
+        // Add timeout to prevent hanging requests
         timeout: 10000
       });
       
+      console.log("Search response:", response.data);
       const resultsData = response.data.results || [];
       
+      // Cache the results
       searchCacheRef.current.set(cacheKey, resultsData);
       
+      // Limit cache size to prevent memory issues
       if (searchCacheRef.current.size > 100) {
         const firstKey = searchCacheRef.current.keys().next().value;
         searchCacheRef.current.delete(firstKey);
@@ -86,6 +101,7 @@ function App() {
       setResults(resultsData);
     } catch (error) {
       console.error("Error searching:", error);
+      // More user-friendly error message
       if (error.code === 'ECONNABORTED') {
         toast.error("Search request timed out. Please try again.");
       } else {
@@ -101,20 +117,25 @@ function App() {
     performSearch(searchQuery, selectedFileType, selectedTags);
   };
 
+  // Improved function to handle search input changes with debouncing
   const handleSearchInputChange = (e) => {
     const value = e.target.value;
     setSearchQuery(value);
     
+    // Clear previous timeout
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
     
+    // Set new timeout - shorter delay for better responsiveness
     searchTimeoutRef.current = setTimeout(() => {
       performSearch(value, selectedFileType, selectedTags);
-    }, 300);
+    }, 300); // 300ms delay for better responsiveness
   };
 
+  // Function to handle immediate search (e.g., on button click)
   const handleImmediateSearch = () => {
+    // Clear any pending debounced search
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
@@ -172,8 +193,9 @@ function App() {
       setSelectedFile(null);
       setShowUpload(false);
       fetchStats();
+      performSearch(searchQuery, selectedFileType, selectedTags); // Refresh results with current filters
+      // Clear cache when new document is uploaded
       clearSearchCache();
-      performSearch(searchQuery, selectedFileType, selectedTags);
     } catch (error) {
       console.error("Error uploading:", error);
       toast.error("Failed to upload document");
@@ -189,7 +211,11 @@ function App() {
       await axios.delete(`${API}/documents/${docId}`);
       toast.success("Document deleted");
       fetchStats();
+      
+      // Remove the deleted document from the current results immediately
       setResults(prevResults => prevResults.filter(doc => doc.id !== docId));
+      
+      // Clear cache when document is deleted
       clearSearchCache();
     } catch (error) {
       console.error("Error deleting:", error);
@@ -243,22 +269,26 @@ function App() {
       setSelectedTags(newTags);
       performSearch(searchQuery, selectedFileType, newTags);
     }
+    // Clear cache when tags change
     clearSearchCache();
   };
 
+  // New function to handle file type changes
   const handleFileTypeChange = (fileType) => {
     setSelectedFileType(fileType);
     performSearch(searchQuery, fileType, selectedTags);
+    // Clear cache when file type changes
     clearSearchCache();
   };
 
   const clearFilters = () => {
     setSelectedFileType("all");
     setSelectedTags([]);
-    setSearchQuery("");
-    performSearch("", "all", []);
+    setSearchQuery(""); // Also clear the search query
+    performSearch("", "all", []); // Search with empty query and no filters
   };
 
+  // Function to clear search cache
   const clearSearchCache = () => {
     searchCacheRef.current.clear();
   };
@@ -267,6 +297,7 @@ function App() {
     <div className="App min-h-screen">
       <Toaster position="top-right" />
       
+      {/* Header */}
       <header className="header-gradient border-b border-white/10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex items-center justify-between">
@@ -284,6 +315,7 @@ function App() {
             </Button>
           </div>
           
+          {/* Search Bar */}
           <form onSubmit={handleSearch} className="mt-8">
             <div className="search-bar">
               <Search className="w-5 h-5 text-gray-400" />
@@ -317,6 +349,7 @@ function App() {
             </div>
           </form>
           
+          {/* Stats and Loading Indicator */}
           <div className="flex items-center gap-6 mt-4 text-sm text-white/70">
             <span>{stats.total_documents} documents</span>
             {(selectedFileType !== "all" || selectedTags.length > 0) && (
@@ -334,6 +367,7 @@ function App() {
         </div>
       </header>
 
+      {/* Filters Panel */}
       {showFilters && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 border-b border-gray-200">
           <div className="flex flex-wrap gap-4">
@@ -376,6 +410,7 @@ function App() {
         </div>
       )}
 
+      {/* Results */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {loading ? (
           <div className="text-center py-12">
@@ -455,6 +490,7 @@ function App() {
         )}
       </main>
 
+      {/* Upload Dialog */}
       <Dialog open={showUpload} onOpenChange={setShowUpload}>
         <DialogContent className="sm:max-w-md" data-testid="upload-dialog">
           <DialogHeader>

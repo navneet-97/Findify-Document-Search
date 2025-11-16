@@ -2,7 +2,7 @@ services:
   - type: web
     name: findify-backend
     env: python
-    buildCommand: "pip install --upgrade pip && pip install --no-build-isolation -r requirements.txt"
+    buildCommand: "pip install --upgrade pip && pip install --only-binary=all -r requirements.txt"
     startCommand: "python main.py"
     envVars:
       - key: PYTHON_VERSION

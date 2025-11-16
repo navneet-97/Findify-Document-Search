@@ -41,12 +41,12 @@ except Exception as e:
     logging.error(f"Error initializing ChromaDB: {e}")
     raise
 
-# Load embedding model
+# Load embedding model with error handling
 try:
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 except Exception as e:
     logging.error(f"Error loading SentenceTransformer: {e}")
-    raise
+    embedding_model = None
 
 # Load zero-shot classifier for auto-categorization
 try:
@@ -57,7 +57,7 @@ try:
     )
 except Exception as e:
     logging.error(f"Error loading zero-shot classifier: {e}")
-    raise
+    classifier = None
 
 # Category labels for auto-tagging
 CANDIDATE_LABELS = [
@@ -184,9 +184,17 @@ def auto_categorize(text: str) -> List[str]:
     if not text or len(text.strip()) < 10:
         return []
     
+    # If classifier is not available, return empty list
+    if not classifier:
+        return []
+    
     try:
         text_sample = text[:500]
-        result = classifier(text_sample, CANDIDATE_LABELS, multi_label=True)
+        # Type check to satisfy linter
+        if classifier is not None:
+            result = classifier(text_sample, CANDIDATE_LABELS, multi_label=True)
+        else:
+            return []
         
         if isinstance(result, dict) and 'labels' in result and 'scores' in result:
             tags = [label for label, score in zip(result['labels'], result['scores']) if score > 0.3]
@@ -224,17 +232,23 @@ async def upload_document(file: UploadFile = File(...)):
             f.write(file_bytes)
         
         text_content = extract_text(file_bytes, file.content_type or "")
-        tags = auto_categorize(text_content)
+        tags = auto_categorize(text_content) if classifier else []
         
-        if text_content:
-            embedding = embedding_model.encode(text_content).tolist()
-            collection.add(
-                ids=[doc_id],
-                embeddings=[embedding],
-                documents=[text_content],
-                metadatas=[{"doc_id": doc_id, "name": filename}]
-            )
-        
+        if text_content and embedding_model:
+            try:
+                # Type check to satisfy linter
+                if embedding_model is not None:
+                    embedding = embedding_model.encode(text_content).tolist()
+                    collection.add(
+                        ids=[doc_id],
+                        embeddings=[embedding],
+                        documents=[text_content],
+                        metadatas=[{"doc_id": doc_id, "name": filename}]
+                    )
+            except Exception as e:
+                logging.error(f"Error generating embedding: {e}")
+                # Continue without embedding if it fails
+
         doc = Document(
             id=doc_id,
             name=filename,
@@ -326,57 +340,59 @@ async def search_documents(query: SearchQuery):
                     updated_at=doc['updated_at']
                 ))
             
-            if len(results) < query.limit and not query.file_types:
+            if len(results) < query.limit and not query.file_types and embedding_model:
                 try:
-                    query_embedding = embedding_model.encode(search_term).tolist()
-                    chroma_results = collection.query(
-                        query_embeddings=[query_embedding],
-                        n_results=min(query.limit - len(results), 50)
-                    )
+                    # Type check to satisfy linter
+                    if embedding_model is not None:
+                        query_embedding = embedding_model.encode(search_term).tolist()
+                        chroma_results = collection.query(
+                            query_embeddings=[query_embedding],
+                            n_results=min(query.limit - len(results), 50)
+                        )
                     
-                    if chroma_results and chroma_results.get('ids') and len(chroma_results['ids']) > 0 and len(chroma_results['ids'][0]) > 0:
-                        ids = chroma_results['ids'][0]
-                        distances_data = chroma_results.get('distances')
-                        distances = []
-                        if distances_data and isinstance(distances_data, list) and len(distances_data) > 0:
-                            distances = distances_data[0]
-                        
-                        semantic_scores = {}
-                        for i, doc_id in enumerate(ids):
-                            distance = distances[i] if i < len(distances) else 0
-                            score = 1 / (1 + distance) if distance is not None else 0
-                            semantic_scores[doc_id] = score
-                        
-                        existing_ids = [r.id for r in results]
-                        additional_filter = {"id": {"$nin": existing_ids}}
-                        if mongo_filter:
-                            combined_filter = {"$and": [mongo_filter, additional_filter]}
-                        else:
-                            combined_filter = additional_filter
+                        if chroma_results and chroma_results.get('ids') and len(chroma_results['ids']) > 0 and len(chroma_results['ids'][0]) > 0:
+                            ids = chroma_results['ids'][0]
+                            distances_data = chroma_results.get('distances')
+                            distances = []
+                            if distances_data and isinstance(distances_data, list) and len(distances_data) > 0:
+                                distances = distances_data[0]
                             
-                        docs = await db.documents.find({"id": {"$in": ids}, **combined_filter}, {"_id": 0}).to_list(len(ids))
-                        
-                        semantic_results = []
-                        for doc in docs:
-                            doc_id = doc['id']
-                            score = semantic_scores.get(doc_id, 0)
+                            semantic_scores = {}
+                            for i, doc_id in enumerate(ids):
+                                distance = distances[i] if i < len(distances) else 0
+                                score = 1 / (1 + distance) if distance is not None else 0
+                                semantic_scores[doc_id] = score
                             
-                            semantic_results.append(DocumentResponse(
-                                id=doc_id,
-                                name=doc['name'],
-                                file_type=doc['file_type'],
-                                size=doc['size'],
-                                tags=doc['tags'],
-                                file_path=doc['file_path'],
-                                snippet=get_snippet(doc.get('text_content', '')),
-                                created_at=doc['created_at'],
-                                updated_at=doc['updated_at'],
-                                score=score
-                            ))
-                        
-                        semantic_results.sort(key=lambda x: x.score or 0, reverse=True)
-                        results.extend(semantic_results[:query.limit - len(results)])
-                        
+                            existing_ids = [r.id for r in results]
+                            additional_filter = {"id": {"$nin": existing_ids}}
+                            if mongo_filter:
+                                combined_filter = {"$and": [mongo_filter, additional_filter]}
+                            else:
+                                combined_filter = additional_filter
+                                
+                            docs = await db.documents.find({"id": {"$in": ids}, **combined_filter}, {"_id": 0}).to_list(len(ids))
+                            
+                            semantic_results = []
+                            for doc in docs:
+                                doc_id = doc['id']
+                                score = semantic_scores.get(doc_id, 0)
+                                
+                                semantic_results.append(DocumentResponse(
+                                    id=doc_id,
+                                    name=doc['name'],
+                                    file_type=doc['file_type'],
+                                    size=doc['size'],
+                                    tags=doc['tags'],
+                                    file_path=doc['file_path'],
+                                    snippet=get_snippet(doc.get('text_content', '')),
+                                    created_at=doc['created_at'],
+                                    updated_at=doc['updated_at'],
+                                    score=score
+                                ))
+                            
+                            semantic_results.sort(key=lambda x: x.score or 0, reverse=True)
+                            results.extend(semantic_results[:query.limit - len(results)])
+                            
                 except Exception as e:
                     logging.error(f"Error in semantic search: {e}")
                     if len(results) == 0:

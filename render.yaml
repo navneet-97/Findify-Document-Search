@@ -3,16 +3,10 @@ services:
   - type: web
     name: findify-fastapi
     env: python
-    region: oregon
     
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
+    buildCommand: pip install -r backend/requirements.txt
 
     startCommand: "uvicorn server:app --host 0.0.0.0 --port $PORT"
-
-    plan: starter
-    autoDeploy: true
 
     envVars:
       - key: MONGO_URL

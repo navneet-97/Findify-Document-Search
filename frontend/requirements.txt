@@ -1,0 +1,3 @@
+# This file is for Vercel deployment to specify Node.js version
+# Vercel will automatically detect and use the correct Node.js version from package.json
+# No additional requirements needed for a React app deployment

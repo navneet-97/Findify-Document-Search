@@ -26,9 +26,9 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017/findify')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'findify')]
 
 # Chroma DB setup
 CHROMA_DB_PATH = ROOT_DIR / 'chroma_db'
@@ -560,10 +560,13 @@ async def get_stats():
 # Include the router in the main app
 app.include_router(api_router)
 
+# Configure CORS
+origins = os.environ.get('CORS_ORIGINS', '*').split(',')
+
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=origins,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )

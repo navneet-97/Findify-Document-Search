@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: findify-backend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.13
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: findify_db
+      - key: CORS_ORIGINS
+        value: "*"

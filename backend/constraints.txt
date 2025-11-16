@@ -1,4 +1,0 @@
-tokenizers==0.13.3
-torch==2.9.1
-torchvision==0.24.1
-sympy==1.13.3

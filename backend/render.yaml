@@ -1,11 +1,25 @@
+# render.yaml
 services:
   - type: web
-    name: findify-backend
+    name: findify-fastapi
     env: python
-    buildCommand: "pip install --upgrade pip && pip install --no-build-isolation -c constraints.txt -r requirements.txt"
-    startCommand: "python main.py"
+    region: oregon
+    
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+    startCommand: "uvicorn server:app --host 0.0.0.0 --port $PORT"
+
+    plan: starter
+    autoDeploy: true
+
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.15
-      - key: TOKENIZERS_PARALLELISM
-        value: false
+      - key: MONGO_URL
+        value: mongodb+srv://Navneet:Navneet@cluster0.ci1bguk.mongodb.net/?retryWrites=true&w=majority
+
+      - key: DB_NAME
+        value: findify_db
+
+      - key: CORS_ORIGINS
+        value: https://findify-document-search.vercel.app,http://localhost:3000

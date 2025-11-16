@@ -32,7 +32,7 @@ db = client[os.environ.get('DB_NAME', 'findify')]
 
 # Chroma DB setup
 CHROMA_DB_PATH = ROOT_DIR / 'chroma_db'
-CHROMA_DB_PATH.mkdir(exist_ok=True)
+CHROMA_DB_PATH.mkdir(exist_ok=True, parents=True)
 try:
     chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
     collection = chroma_client.get_or_create_collection(

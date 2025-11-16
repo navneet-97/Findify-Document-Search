@@ -3,13 +3,10 @@ services:
     name: findify-fastapi
     env: python
 
-    buildCommand: |
-      cd backend
-      pip install -r requirements.txt
+    rootDirectory: backend
 
-    startCommand: |
-      cd backend
-      uvicorn server:app --host 0.0.0.0 --port $PORT
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn server:app --host 0.0.0.0 --port $PORT"
 
     envVars:
       - key: MONGO_URL

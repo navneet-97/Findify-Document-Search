@@ -583,6 +583,11 @@ logger = logging.getLogger(__name__)
 async def shutdown_db_client():
     client.close()
 
+# Add health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
 # Add main block to run the app
 if __name__ == "__main__":
     import uvicorn

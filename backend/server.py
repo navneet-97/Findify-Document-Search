@@ -45,7 +45,7 @@ except Exception as e:
 
 # Load embedding model
 try:
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Small, efficient model
 except Exception as e:
     logging.error(f"Error loading SentenceTransformer: {e}")
     raise
@@ -54,7 +54,7 @@ except Exception as e:
 try:
     classifier = pipeline(
         "zero-shot-classification",
-        model="facebook/bart-large-mnli",
+        model="valhalla/distilbart-mnli-12-3",  # Smaller, faster model
         device=-1  # CPU
     )
 except Exception as e:

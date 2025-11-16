@@ -172,8 +172,8 @@ function App() {
       setSelectedFile(null);
       setShowUpload(false);
       fetchStats();
-      performSearch(searchQuery, selectedFileType, selectedTags);
       clearSearchCache();
+      performSearch(searchQuery, selectedFileType, selectedTags);
     } catch (error) {
       console.error("Error uploading:", error);
       toast.error("Failed to upload document");

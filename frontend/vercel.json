@@ -26,8 +26,5 @@
       "src": "/(.*)",
       "dest": "/index.html"
     }
-  ],
-  "env": {
-    "REACT_APP_BACKEND_URL": "https://your-render-app-url.onrender.com"
-  }
+  ]
 }
